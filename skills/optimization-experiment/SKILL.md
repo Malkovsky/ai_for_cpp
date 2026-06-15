@@ -135,7 +135,32 @@ When results are noisy:
 - rerun the narrow benchmark filter once
 - avoid changing benchmark scope between baseline and candidate
 
-## Step 6 - Iterate Deliberately
+## Step 6 - Persist Measurement Evidence
+
+Before ending any experiment turn that produced timing or counter results, write
+a measurement snapshot at the top of one relevant repository file. Prefer, in
+order:
+
+- the experimental header/source being evaluated
+- the production header/source when the result is promoted or establishes the
+  current production baseline
+- the benchmark source when the measurement describes benchmark coverage rather
+  than one implementation
+- a repository-local experiment log or documentation file when code comments
+  would be misleading
+
+The snapshot must include:
+
+- benchmark date
+- command or filter shape
+- metric units in table headers
+- fixed decimal precision within each metric for readability
+- enough context to distinguish production measurements from experimental ones
+
+For grouped results, separate logical blocks with visible horizontal rows or
+short headings so future readers can scan by size, workload, or variant.
+
+## Step 7 - Iterate Deliberately
 
 For each candidate, decide one of:
 
@@ -156,7 +181,7 @@ Use benchmark data to choose the next idea. Examples:
 When no idea wins convincingly, document the best result and stop rather than
 overfitting.
 
-## Step 7 - Finalize the Result
+## Step 8 - Finalize the Result
 
 If promoting a candidate to production:
 
@@ -167,8 +192,8 @@ If promoting a candidate to production:
 
 If leaving work experimental:
 
-- add a short note near the experimental code with benchmark date, command, and
-  the relevant table or JSON artifact path
+- add a short note near the experimental code with benchmark date, command,
+  metric units, and the relevant table or JSON artifact path
 - clearly state that production callers do not use the experimental variant
 - explain which workload the variant helps and where it loses
 
@@ -191,3 +216,5 @@ The final response should include:
 6. Treat hardware counters as explanatory data, not a replacement for timing.
 7. Record enough benchmark context that future agents do not confuse
    experimental wins with production behavior.
+8. Never leave benchmark measurements only in the chat transcript or `/tmp`;
+   persist a top-of-file measurement snapshot in the repository.
