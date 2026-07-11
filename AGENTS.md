@@ -63,10 +63,11 @@ token counts and update the single `Skill Summary` table in `README.md`. Keep
 its descriptions short and human-facing. Do not add operational instructions
 or command examples to that README section.
 
-For the `Recommended MCP Servers` table, link the MCP name directly to its
-official source, pin the measured version or commit, and count the exact
-recommended tool set. `Tool metadata` includes each tool name, description,
-and input schema, but not client-specific wrappers.
+For the `Recommended MCP Servers` table, include the measured version or short
+commit in the linked MCP name, with the link targeting that pinned official
+source revision. Do not add a separate version or commit column. Count the
+exact recommended tool set. `Tool metadata` includes each tool name,
+description, and input schema, but not client-specific wrappers.
 
 ## Change Discipline
 

@@ -27,8 +27,9 @@ additional bundled readable context. Project-local overlays are excluded.
 ## Recommended MCP Servers
 
 Tool metadata counts use `tiktoken:o200k_base` over each canonical tool name,
-description, and input schema. Client-specific wrappers are excluded. We keep the link to a specific commit for reproducibility but in general it is reommended to use the latest version. 
+description, and input schema. Client-specific wrappers are excluded. Counts
+pin a commit for reproducibility; use the latest version when installing.
 
-| MCP | Description | Commit | Tools | Tool metadata |
-|---|---|---:|---:|---:|
-| [Clang Index](https://github.com/kandrwmrtn/cplusplus_mcp/tree/4f009b7d7b39ae09893d9c67cd9bd8b31e6d7e86) | Index and query C++ symbols, inheritance, and call graphs with libclang. | `4f009b7` | 14 | 1,017 |
+| MCP | Description | Tools | Tool metadata |
+|---|---|---:|---:|
+| [Clang Index @ 4f009b7](https://github.com/kandrwmrtn/cplusplus_mcp/tree/4f009b7d7b39ae09893d9c67cd9bd8b31e6d7e86) | Index and query C++ symbols, inheritance, and call graphs with libclang. | 14 | 1,017 |
