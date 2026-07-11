@@ -137,9 +137,9 @@ When results are noisy:
 
 ## Step 6 - Persist Measurement Evidence
 
-Before ending any experiment turn that produced timing or counter results, write
-a measurement snapshot at the top of one relevant repository file. Prefer, in
-order:
+For promoted implementations, accepted baselines, or final comparison tables,
+write a measurement snapshot at the top of one relevant repository file. Prefer,
+in order:
 
 - the experimental header/source being evaluated
 - the production header/source when the result is promoted or establishes the
@@ -159,6 +159,11 @@ The snapshot must include:
 
 For grouped results, separate logical blocks with visible horizontal rows or
 short headings so future readers can scan by size, workload, or variant.
+
+Do not preserve every throwaway probe in production headers. Failed ideas,
+diagnostic-only runs, and machine-local JSON paths can stay in `/tmp`, the final
+response, or a dedicated experiment log when they are useful but not part of the
+current documented state.
 
 ## Step 7 - Iterate Deliberately
 
