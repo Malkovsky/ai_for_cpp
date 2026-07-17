@@ -33,3 +33,4 @@ pin a commit for reproducibility; use the latest version when installing.
 | MCP | Description | Tools | Tool metadata |
 |---|---|---:|---:|
 | [Clang Index @ 4f009b7](https://github.com/kandrwmrtn/cplusplus_mcp/tree/4f009b7d7b39ae09893d9c67cd9bd8b31e6d7e86) | Index and query C++ symbols, inheritance, and call graphs with libclang. | 14 | 1,017 |
+| [LLDB MCP @ llvmorg-22.1.8](https://github.com/llvm/llvm-project/tree/llvmorg-22.1.8/lldb) | Bridge an MCP client to a local LLDB command session. | 2 | 93 |
