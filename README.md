@@ -1,5 +1,7 @@
 # Shared C++ Agent Guidance
 
+[![Token summary](https://how-much-tokens.onrender.com/badge/github/Malkovsky/ai_for_cpp.svg?metric=summary&encoding=o200k_base&v=repo-inventory-v14-badge3)](https://how-much-tokens.onrender.com/github/Malkovsky/ai_for_cpp/latest?encoding=o200k_base)
+
 Reusable C++ agent skills, MCPs and related commands for research and engineering
 workflows.
 
