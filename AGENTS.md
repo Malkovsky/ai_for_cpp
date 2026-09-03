@@ -51,23 +51,14 @@ token cost.
 Use the `estimate-token-usage` skill for skill, MCP, and general-context token
 accounting. Do not duplicate its invocation or counting logic in guidance.
 
-For the shared skill summary:
-
-- `Metadata` counts only the `name` and `description` values.
-- `Body` counts only post-frontmatter `SKILL.md` content.
-- `Optional` counts additional bundled readable context, excluding scripts,
-  assets, UI metadata, and consuming-project overlays.
-
-When shared skill metadata, bodies, or optional context change, regenerate the
-token counts and update the single `Skill Summary` table in `README.md`. Keep
-its descriptions short and human-facing. Do not add operational instructions
-or command examples to that README section.
+Keep the `Skill Summary` and `Recommended MCP Servers` tables descriptive. Do
+not duplicate numeric token or tool counts there; the README badge links to the
+current generated token report. Keep descriptions short and human-facing, and
+do not add operational instructions or command examples to those tables.
 
 For the `Recommended MCP Servers` table, include the measured version or short
 commit in the linked MCP name, with the link targeting that pinned official
-source revision. Do not add a separate version or commit column. Count the
-exact recommended tool set. `Tool metadata` includes each tool name,
-description, and input schema, but not client-specific wrappers.
+source revision. Do not add a separate version or commit column.
 
 ## Change Discipline
 

@@ -23,11 +23,13 @@ Iterate from a production implementation to one or more experimental
 implementations, prove semantic equivalence, measure the impact, and decide
 whether a candidate is worth promoting.
 
-The standard loop is:
+Use this standard loop:
 
 ```text
 target -> benchmark baseline -> experimental same-API variant
-       -> correctness check -> benchmark compare -> keep / revise / discard
+       -> correctness check -> optimized assembly inspection
+       -> llvm-mca screen when suitable -> equal-work perf counters
+       -> pinned timing -> integrated benchmark -> keep / revise / discard
 ```
 
 Stop when a candidate is clearly better on the intended workload without
@@ -112,7 +114,89 @@ Prefer:
 Do not compare performance for a candidate that has not passed the correctness
 checks for the same semantics as production.
 
-## Step 5 - Benchmark and Compare
+## Step 5 - Screen Tight Compute Kernels Cheaply
+
+Apply the following screening funnel to tight, compute-bound kernels before
+spending time on full benchmark runs:
+
+1. Pass correctness checks.
+2. Inspect optimized assembly for the intended hot loop.
+3. Run `llvm-mca` as a non-authoritative static screen.
+4. Reject spills, duplicated setup, and disproportionate hot-path code growth.
+5. Compare fixed, equal work with non-multiplexed `perf stat` event groups.
+6. Confirm with pinned timing and the integrated benchmark suite.
+
+Preflight the tools and target before interpreting generated code:
+
+```bash
+CXX=${CXX:-clang++}
+LLVM_MCA=${LLVM_MCA:-llvm-mca}
+"${CXX}" --version
+"${LLVM_MCA}" --version
+"${LLVM_MCA}" -mcpu=help
+perf --version
+```
+
+Record the exact compiler and analyzer versions. Compile the inspected assembly
+with the production optimization level, definitions, include paths, language
+mode, and ISA flags. Select an `llvm-mca -mcpu` model matching the measured CPU
+or intended deployment target; do not silently analyze host-native assembly
+against a different processor model.
+
+Generate and inspect optimized assembly before static modeling:
+
+```bash
+"${CXX}" <production compile flags> -S <source.cc> -o /tmp/<target>.s
+```
+
+Verify expected specialization, inlining, vector width, branches, calls, loop
+shape, loads/stores, and stack traffic. Restrict analysis to the steady-state
+hot loop with `# LLVM-MCA-BEGIN` and `# LLVM-MCA-END` assembly markers rather
+than feeding an entire translation unit to `llvm-mca`.
+
+```bash
+MCA_CPU=${MCA_CPU:-native}
+"${LLVM_MCA}" -mcpu="${MCA_CPU}" --iterations=100 \
+  --bottleneck-analysis --resource-pressure --timeline /tmp/<target>.s
+```
+
+Use modeled block throughput, dependency chains, scheduler pressure, and port
+pressure to reject weak candidates or choose the next experiment. Treat every
+result as static-model evidence, not a speed prediction: `llvm-mca` does not
+model the full cache hierarchy, branch behavior, runtime alignment, surrounding
+code, or system effects. De-emphasize or skip it for memory-bound kernels,
+complex or data-dependent control flow, and whole applications.
+
+Reject candidates with new hot-loop spills or substantial code bloat unless
+authoritative measurements demonstrate a worthwhile tradeoff. Do not promote a
+candidate solely because its modeled throughput improved.
+
+## Step 6 - Compare Fixed Equal Work with perf
+
+Use `perf stat` after static screening to explain candidate deltas on real
+hardware. Run the same binary scope, inputs, and fixed operation or iteration
+count for every candidate. Pin each run to the same CPU.
+
+Collect only events that fit simultaneously. Use explicit event groups and run
+separate invocations for core, branch, and cache groups rather than allowing
+counter multiplexing. Reject output containing scaled/multiplexed counts or
+`<not counted>`; split the group and rerun.
+
+```bash
+PERF_BIN=${PERF_BIN:-perf}
+for EVENTS in \
+  '{cycles,instructions}' \
+  '{branches,branch-misses}' \
+  '{L1-dcache-loads,L1-dcache-load-misses}'; do
+  "${PERF_BIN}" stat -r 5 -e "${EVENTS}" -- \
+    taskset -c "${BENCH_CPU:-0}" <benchmark-binary> <fixed-equal-work-options>
+done
+```
+
+Treat counters as explanatory evidence. Treat real pinned timing and integrated
+benchmarks over representative workloads as authoritative.
+
+## Step 7 - Benchmark and Compare
 
 Run timing benchmarks from Release builds. Save JSON for every meaningful
 baseline and candidate.
@@ -135,7 +219,7 @@ When results are noisy:
 - rerun the narrow benchmark filter once
 - avoid changing benchmark scope between baseline and candidate
 
-## Step 6 - Persist Measurement Evidence
+## Step 8 - Persist Measurement Evidence
 
 For promoted implementations, accepted baselines, or final comparison tables,
 write a measurement snapshot at the top of one relevant repository file. Prefer,
@@ -165,7 +249,7 @@ diagnostic-only runs, and machine-local JSON paths can stay in `/tmp`, the final
 response, or a dedicated experiment log when they are useful but not part of the
 current documented state.
 
-## Step 7 - Iterate Deliberately
+## Step 9 - Iterate Deliberately
 
 For each candidate, decide one of:
 
@@ -186,7 +270,7 @@ Use benchmark data to choose the next idea. Examples:
 When no idea wins convincingly, document the best result and stop rather than
 overfitting.
 
-## Step 8 - Finalize the Result
+## Step 10 - Finalize the Result
 
 If promoting a candidate to production:
 
@@ -223,3 +307,5 @@ The final response should include:
    experimental wins with production behavior.
 8. Never leave benchmark measurements only in the chat transcript or `/tmp`;
    persist a top-of-file measurement snapshot in the repository.
+9. Treat `llvm-mca` as a rejection and diagnosis aid, not benchmark evidence.
+10. Match compiler flags and modeled CPU to the code and hardware under test.

@@ -5,8 +5,8 @@ description: Run Google Benchmark binaries, including filtering, hardware counte
 
 # Benchmarks Skill
 
-You now have expertise in running and interpreting Google Benchmark suites.
-Follow these workflows:
+Use this skill to run and interpret Google Benchmark suites. Follow these
+workflows:
 
 ## Build Directory Convention
 
@@ -36,6 +36,26 @@ BUILD_SUFFIX=agent
 > Google Benchmark will print `***WARNING*** Library was built as DEBUG` and timings will
 > be 3-10x slower and meaningless. Always verify the binary path contains `Release/` or
 > `RelWithDebInfo/`, never `Debug/`.
+
+## Preflight Tools and Target
+
+Record tool versions and the measured CPU before comparing results:
+
+```bash
+CXX=${CXX:-c++}
+LLVM_MCA=${LLVM_MCA:-llvm-mca}
+PERF_BIN=${PERF_BIN:-perf}
+"${CXX}" --version
+"${LLVM_MCA}" --version
+"${PERF_BIN}" --version
+lscpu
+```
+
+Allow missing `llvm-mca` when no static kernel screen is appropriate. Prefer the
+same compiler and `llvm-mca` release across candidates. Compile inspected code
+with the benchmark's optimization, definitions, includes, language mode, and
+ISA flags. Match the `llvm-mca -mcpu` model to the measured CPU or deployment
+target; avoid combining host-native code with an unrelated model.
 
 ## Step 1 — Build
 
@@ -152,7 +172,55 @@ Validate output before consuming:
 python3 -m json.tool results.json > /dev/null
 ```
 
-## Step 3 — Profile with perf (Linux only)
+## Step 3 — Screen Compute-Bound Tight Kernels
+
+Use this cheap funnel only for a small, compute-bound hot loop:
+
+1. Require correctness first.
+2. Inspect optimized assembly for specialization, vectorization, branches,
+   calls, stack spills, and code size.
+3. Analyze only the steady-state loop with `llvm-mca` region markers.
+4. Reject regressions in spills or disproportionate code growth.
+5. Collect fixed-equal-work hardware counters without multiplexing.
+6. Confirm with real pinned timing and integrated benchmarks.
+
+Generate assembly with production-equivalent flags, bracket only the hot region
+with `# LLVM-MCA-BEGIN` and `# LLVM-MCA-END`, and run:
+
+```bash
+MCA_CPU=${MCA_CPU:-native}
+"${CXX}" <production compile flags> -S <source.cc> -o /tmp/kernel.s
+"${LLVM_MCA}" -mcpu="${MCA_CPU}" --iterations=100 \
+  --bottleneck-analysis --resource-pressure --timeline /tmp/kernel.s
+```
+
+Use block throughput, dependencies, and resource/port pressure only as static
+screening evidence. De-emphasize or skip `llvm-mca` for memory-bound work,
+complex or data-dependent control flow, and whole applications. Never treat an
+assembly difference or modeled cycle count as a measured performance result.
+
+Run fixed, equal benchmark iterations for real counter comparisons. Group only
+events that can be scheduled together; use separate invocations to avoid
+multiplexing:
+
+```bash
+BENCH_ITERATIONS=${BENCH_ITERATIONS:-10000}
+for EVENTS in \
+  '{cycles,instructions}' \
+  '{branches,branch-misses}' \
+  '{L1-dcache-loads,L1-dcache-load-misses}'; do
+  "${PERF_BIN}" stat -r 5 -e "${EVENTS}" -- \
+    ${BENCH_RUN} <benchmark-binary> \
+      --benchmark_filter="^${ROW}$" \
+      --benchmark_min_time="${BENCH_ITERATIONS}x"
+done
+```
+
+Reject scaled/multiplexed or `<not counted>` results; split the event group and
+rerun. Treat counters as diagnostic. Treat pinned elapsed timing and the
+representative integrated benchmark suite as authoritative.
+
+## Step 4 — Profile with perf (Linux only)
 
 Use when hardware counters alone are not enough and you need a full call-graph profile for post-processing.
 
@@ -207,3 +275,11 @@ perf script -F +pid > perf.data.txt
 9. **Fail fast on environment issues**: precheck Python deps used by compare tooling (`numpy`, `scipy`)
 10. **Use explicit retry limits**: on timeout, narrow scope and retry once; avoid repeated full-suite attempts
 11. **Preflight perf counters**: run a tiny counter-enabled benchmark first; if counters unavailable, skip counter workflow
+12. **Use llvm-mca narrowly**: screen straight-line compute kernels, not
+    memory-bound paths or whole applications
+13. **Reject spills and code bloat early**: advance them only when real timing
+    justifies the tradeoff
+14. **Use fixed equal work for counters**: keep iterations identical and split
+    events into non-multiplexed groups
+15. **Keep timing authoritative**: require pinned real timing and integrated
+    benchmarks before accepting a change
