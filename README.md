@@ -14,7 +14,7 @@ linked by the badge above.
 | Skill | Description |
 |---|---|
 | `benchmarks` | Run and interpret Google Benchmark suites. |
-| `benchmarks-affected` | Find benchmarks affected by branch changes. |
+| `focused-validation` | Scope focused builds, tests, and benchmarks using native build metadata. |
 | `benchmarks-compare-revisions` | Compare benchmark performance across Git revisions. |
 | `capture-learnings` | Preserve durable research engineering learnings. |
 | `cmake` | Configure, build, and test CMake projects. |

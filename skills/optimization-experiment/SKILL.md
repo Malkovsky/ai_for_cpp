@@ -12,8 +12,8 @@ This workflow depends on:
 
 1. `../benchmarks/SKILL.md` for Google Benchmark build/run commands, JSON output,
    hardware counters, pinning, and perf profiling.
-2. `../benchmarks-affected/SKILL.md` when changes need an affected benchmark
-   scope.
+2. `../focused-validation/SKILL.md` for focused build, test, and benchmark
+   scope during iteration and broader validation before promotion.
 3. `../benchmarks-compare-revisions/SKILL.md` when comparing committed
    revisions.
 

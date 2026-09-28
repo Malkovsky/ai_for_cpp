@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Plan focused validation from native build metadata, with explicit fallbacks."""
 
 from __future__ import annotations
 
@@ -11,10 +12,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from cmake_model import load_model, map_entries
 
 
 def is_project_source(source: Path, repo_root: Path) -> bool:
@@ -70,6 +75,7 @@ class CompileCommandEntry:
     target: str | None
     dependencies: set[Path] = field(default_factory=set)
     dep_error: str | None = None
+    dependency_origin: str = "not_scanned"
 
 
 @dataclass
@@ -98,8 +104,8 @@ def run_command(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze benchmark impact between baseline and HEAD via "
-            "compile_commands dependency mapping and clang AST analysis."
+            "Scope affected builds, tests, and benchmarks using CMake File API "
+            "and compiler dependencies, with explicit inference fallbacks."
         )
     )
     parser.add_argument(
@@ -127,9 +133,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--format",
-        choices=["text", "json"],
+        choices=["text", "json", "summary"],
         default="text",
-        help="Output format (default: text).",
+        help="Output format; summary omits per-case lists and long commands.",
     )
     parser.add_argument(
         "--include-working-tree",
@@ -147,7 +153,33 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable working-tree inclusion and only analyze <baseline>...<head>.",
     )
-    return parser.parse_args()
+    parser.add_argument("--changed-file", action="append", default=[],
+                        help="Analyze only this file (repeatable); bypass Git diff scope.")
+    parser.add_argument("--working-tree-only", action="store_true",
+                        help="Analyze staged, unstaged, and untracked files, not branch history.")
+    parser.add_argument("--target", action="append", default=[],
+                        help="Limit analysis/build selection to this known target (repeatable).")
+    parser.add_argument("--kind", choices=["all", "tests", "benchmarks"], default="all",
+                        help="Select validation kind; File API retains its library prerequisites.")
+    parser.add_argument("--ast", action="store_true",
+                        help="Opt in to expensive, heuristic benchmark AST refinement.")
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--timeout", type=float, default=15,
+                        help="Per compiler scan/AST timeout in seconds (default: 15).")
+    parser.add_argument("--config", default="Release",
+                        help="CMake build configuration (default: Release).")
+    parser.add_argument("--ctest-json", type=Path,
+                        help="Existing ctest --show-only=json-v1 inventory for exact test selection.")
+    parser.add_argument("--test-regex", help="Narrow discovered CTest names for an experiment.")
+    parser.add_argument("--benchmark-regex", help="Explicit candidate runtime benchmark filter.")
+    cli = parser.parse_args()
+    if cli.jobs < 1 or cli.timeout <= 0:
+        parser.error("jobs and timeout must be positive")
+    if cli.changed_file and cli.working_tree_only:
+        parser.error("choose --changed-file or --working-tree-only")
+    if cli.test_regex and not cli.ctest_json:
+        parser.error("--test-regex requires --ctest-json to validate the selection")
+    return cli
 
 
 def git_repo_root() -> Path:
@@ -201,6 +233,8 @@ def load_compile_commands(
             arguments = shlex.split(raw_entry["command"])
 
         output = infer_output_path(arguments, directory)
+        if output is None and raw_entry.get("output"):
+            output = (directory / raw_entry["output"]).resolve()
         target = infer_cmake_target_from_output(output)
 
         entries.append(
@@ -249,10 +283,9 @@ def infer_cmake_target_from_output(output: Path | None) -> str | None:
 
 def git_changed_files(repo_root: Path, baseline: str, head: str) -> set[Path]:
     diff_range = f"{baseline}...{head}"
-    proc = run_command(["git", "diff", "--name-only", diff_range], cwd=repo_root)
+    proc = run_command(["git", "diff", "--name-only", "-z", diff_range], cwd=repo_root)
     changed_files: set[Path] = set()
-    for line in proc.stdout.splitlines():
-        line = line.strip()
+    for line in proc.stdout.split("\0"):
         if not line:
             continue
         changed_files.add((repo_root / line).resolve())
@@ -262,13 +295,13 @@ def git_changed_files(repo_root: Path, baseline: str, head: str) -> set[Path]:
 def git_working_tree_changed_files(repo_root: Path) -> set[Path]:
     changed_files: set[Path] = set()
     commands = [
-        ["git", "diff", "--name-only"],
-        ["git", "diff", "--name-only", "--cached"],
+        ["git", "diff", "--name-only", "-z"],
+        ["git", "diff", "--name-only", "--cached", "-z"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
     ]
     for cmd in commands:
         proc = run_command(cmd, cwd=repo_root)
-        for line in proc.stdout.splitlines():
-            line = line.strip()
+        for line in proc.stdout.split("\0"):
             if not line:
                 continue
             changed_files.add((repo_root / line).resolve())
@@ -459,7 +492,9 @@ def clean_command_for_dependency_scan(arguments: list[str]) -> list[str]:
 
 
 def parse_makefile_dependencies(stdout_text: str) -> list[str]:
-    flattened = stdout_text.replace("\\\n", " ").replace("\n", " ")
+    # Ignore trailing -MP phony rules, which are not dependencies.
+    logical_lines = stdout_text.replace("\\\n", " ").splitlines()
+    flattened = next((line for line in logical_lines if ":" in line), "")
     if ":" not in flattened:
         return []
     dep_payload = flattened.split(":", 1)[1].strip()
@@ -468,7 +503,45 @@ def parse_makefile_dependencies(stdout_text: str) -> list[str]:
     return shlex.split(dep_payload)
 
 
-def compute_tu_dependencies(entry: CompileCommandEntry) -> None:
+@lru_cache(maxsize=None)
+def dependency_path(token: str, directory: Path) -> Path:
+    return (directory / token).resolve()
+
+
+@lru_cache(maxsize=None)
+def modification_time(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def cached_tu_dependencies(entry: CompileCommandEntry) -> bool:
+    """Reuse a fresh GCC/Clang depfile; stale graphs need a preprocessor scan."""
+    if entry.output is None:
+        return False
+    depfile = Path(str(entry.output) + ".d")
+    try:
+        stamp = depfile.stat().st_mtime_ns
+        tokens = parse_makefile_dependencies(depfile.read_text())
+    except (OSError, ValueError):
+        return False
+    if not tokens:
+        return False
+    dependencies = {dependency_path(token, entry.directory) for token in tokens}
+    dependencies.add(entry.source)
+    if any(modification_time(path) is None or modification_time(path) > stamp
+           for path in dependencies):
+        return False
+    entry.dependencies = dependencies
+    entry.dependency_origin = "depfile"
+    return True
+
+
+def compute_tu_dependencies(entry: CompileCommandEntry, timeout: float = 15) -> None:
+    if cached_tu_dependencies(entry):
+        return
+    entry.dependency_origin = "preprocessor"
     dep_cmd = clean_command_for_dependency_scan(entry.arguments)
     if not dep_cmd:
         entry.dep_error = "Empty compile command after sanitization"
@@ -481,8 +554,8 @@ def compute_tu_dependencies(entry: CompileCommandEntry) -> None:
         dep_cmd.append(source_arg)
 
     try:
-        proc = run_command(dep_cmd, cwd=entry.directory, check=False)
-    except FileNotFoundError as exc:
+        proc = run_command(dep_cmd, cwd=entry.directory, check=False, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         entry.dep_error = str(exc)
         entry.dependencies = {entry.source}
         return
@@ -497,13 +570,7 @@ def compute_tu_dependencies(entry: CompileCommandEntry) -> None:
         return
 
     for dep in parse_makefile_dependencies(proc.stdout):
-        dep_path = Path(dep)
-        resolved = (
-            dep_path.resolve()
-            if dep_path.is_absolute()
-            else (entry.directory / dep_path).resolve()
-        )
-        dependencies.add(resolved)
+        dependencies.add(dependency_path(dep, entry.directory))
 
     entry.dependencies = dependencies
 
@@ -536,7 +603,8 @@ def identify_benchmark_targets(
         except ValueError:
             rel_text = entry.source.as_posix()
 
-        if rel_text.startswith("src/benchmarks/"):
+        if (set(Path(rel_text).parts) & {"benchmark", "benchmarks", "bench"}
+                or re.search(r"(?:^|_)(?:benchmark|benchmarks|bench)$", entry.target)):
             benchmark_targets.add(entry.target)
 
     benchmark_targets.update(targets_present.intersection(KNOWN_BENCHMARK_TARGETS))
@@ -555,9 +623,9 @@ def dedupe_entries_by_target_source(
     entries: list[CompileCommandEntry],
 ) -> list[CompileCommandEntry]:
     deduped: list[CompileCommandEntry] = []
-    seen: set[tuple[str | None, Path]] = set()
+    seen: set[tuple] = set()
     for entry in entries:
-        key = (entry.target, entry.source)
+        key = (entry.target, entry.source, entry.directory, tuple(entry.arguments))
         if key in seen:
             continue
         seen.add(key)
@@ -708,6 +776,7 @@ def ast_analyze_entry(
     changed_files: set[Path],
     changed_symbol_names: set[str],
     clangxx: str,
+    timeout: float = 15,
 ) -> AstImpactResult:
     result = AstImpactResult()
 
@@ -717,8 +786,8 @@ def ast_analyze_entry(
         return result
 
     try:
-        proc = run_command(ast_cmd, cwd=entry.directory, check=False)
-    except FileNotFoundError as exc:
+        proc = run_command(ast_cmd, cwd=entry.directory, check=False, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         result.ast_error = str(exc)
         return result
 
@@ -820,8 +889,45 @@ def regex_for_benchmarks(names: set[str]) -> str | None:
     if not names:
         return None
     ordered = sorted(names)
-    body = "|".join(re.escape(name) for name in ordered)
+    body = "|".join(regex_literal(name) for name in ordered)
     return rf"^({body})(/|$)"
+
+
+def regex_literal(name: str) -> str:
+    # CTest/Google Benchmark reject some Python re.escape identity escapes.
+    return "".join("\\" + char if char in r"\.^$|?*+()[]{}" else char
+                   for char in name)
+
+
+def identify_test_targets(entries: list[CompileCommandEntry]) -> set[str]:
+    return {entry.target for entry in entries if entry.target and (
+        set(entry.source.parts) & {"test", "tests", "unittests"}
+        or re.search(r"(?:^|_)(?:test|tests|unittests)$", entry.target))}
+
+
+def select_ctest_tests(inventory: dict[str, Any], targets: set[str],
+                       pattern: str | None, artifacts=None) -> tuple[list[str], set[str]]:
+    """Match verified target labels or executable basenames, then a name filter."""
+    names = []
+    mapped = set()
+    executable_paths = {}
+    for test in inventory.get("tests", []):
+        labels = next((p["value"] for p in test.get("properties", [])
+                       if p["name"] == "LABELS"), [])
+        command = test.get("command", [])
+        executable = Path(command[0]).stem if command else ""
+        owners = targets.intersection(set(labels) | {executable})
+        if command and artifacts:
+            if command[0] not in executable_paths:
+                executable_paths[command[0]] = Path(command[0]).resolve()
+            executable_path = executable_paths[command[0]]
+            owners.update(target for target in targets
+                          if executable_path in artifacts.get(target, set()))
+        if owners:
+            mapped.update(owners)
+            if pattern is None or re.search(pattern, test["name"]):
+                names.append(test["name"])
+    return sorted(set(names)), mapped
 
 
 def relpath_or_abs(path: Path, root: Path) -> str:
@@ -831,26 +937,82 @@ def relpath_or_abs(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
+def ctest_selection(inventory, names, targets):
+    """Avoid CTest's regex program-size limit for large typed-test inventories."""
+    pattern = "^(" + "|".join(regex_literal(n) for n in names) + ")$"
+    if len(pattern) <= 4096:
+        return ["-R", pattern], "names"
+    selected = set(names)
+    labeled = set()
+    for test in inventory.get("tests", []):
+        labels = next((p["value"] for p in test.get("properties", [])
+                       if p["name"] == "LABELS"), [])
+        if targets.intersection(labels):
+            labeled.add(test["name"])
+    if labeled == selected:
+        return ["-L", "^(" + "|".join(regex_literal(t) for t in sorted(targets)) + ")$"], "labels"
+    # CTest <3.29 lacks --tests-from-file. Exact numeric selection is supported
+    # there; use only with the same freshly discovered inventory/configuration.
+    indices = [str(i) for i, test in enumerate(inventory["tests"], 1)
+               if test["name"] in selected]
+    return ["-I", "0,0,0," + ",".join(indices)], "indices"
+
+
 def main() -> int:
+    started = time.monotonic()
     cli = parse_args()
 
     try:
         repo_root = git_repo_root()
-        changed_files = git_changed_files(repo_root, cli.baseline, cli.head)
-        if cli.include_working_tree:
-            changed_files.update(git_working_tree_changed_files(repo_root))
-        changed_line_map = git_changed_line_map(
-            repo_root,
-            cli.baseline,
-            cli.head,
-            cli.include_working_tree,
-        )
-        changed_symbol_names = collect_changed_symbol_names(changed_line_map)
+        if cli.changed_file:
+            changed_files = {(repo_root / path).resolve() for path in cli.changed_file}
+        elif cli.working_tree_only:
+            changed_files = git_working_tree_changed_files(repo_root)
+        else:
+            changed_files = git_changed_files(repo_root, cli.baseline, cli.head)
+            if cli.include_working_tree:
+                changed_files.update(git_working_tree_changed_files(repo_root))
+        changed_symbol_names = set()
+        if cli.ast and not cli.changed_file and not cli.working_tree_only:
+            changed_symbol_names = collect_changed_symbol_names(git_changed_line_map(
+                repo_root, cli.baseline, cli.head, cli.include_working_tree))
         compile_commands_path = resolve_compile_commands(
             repo_root, cli.compile_commands
         )
         entries = load_compile_commands(compile_commands_path, repo_root)
-    except FileNotFoundError as exc:
+        configurations = {"Debug", "Release", "RelWithDebInfo", "MinSizeRel"}
+        entries = [entry for entry in entries if entry.output is None
+                   or not (set(entry.output.parts) & configurations)
+                   or cli.config in entry.output.parts]
+        metadata_warnings = []
+        model = None
+        target_metadata = "object_path_fallback"
+        try:
+            model = load_model(compile_commands_path.parent, cli.config)
+            entries, unmapped_sources = map_entries(entries, model)
+            target_metadata = "cmake_file_api"
+            if unmapped_sources:
+                target_metadata = "cmake_file_api_partial"
+                metadata_warnings.append("Object-path fallback for sources missing from CMake metadata: "
+                                         + ", ".join(unmapped_sources))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            metadata_warnings.append(f"{exc}; using object-path target inference. "
+                                     "Request codemodel-v2 and cmakeFiles-v1, then reconfigure "
+                                     "the existing tree. Link consumers are unresolved in fallback mode.")
+        available_targets = {entry.target for entry in entries if entry.target}
+        if model:
+            available_targets.update(model.targets)
+        unknown = set(cli.target) - available_targets
+        if unknown:
+            raise ValueError(f"Unknown targets for this compile database/config: {sorted(unknown)}")
+        if cli.target:
+            entries = [entry for entry in entries if entry.target in cli.target]
+        if not entries and not (model and cli.target):
+            raise ValueError("No project compile entries in the selected configuration")
+        if cli.test_regex:
+            re.compile(cli.test_regex)
+        inventory = json.loads(cli.ctest_json.read_text()) if cli.ctest_json else None
+    except (OSError, ValueError, re.error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except subprocess.CalledProcessError as exc:
@@ -869,7 +1031,17 @@ def main() -> int:
             target_to_entries[entry.target].append(entry)
 
     benchmark_targets = identify_benchmark_targets(entries, repo_root)
+    test_targets = identify_test_targets(entries)
+    if inventory is not None:
+        _, registered_targets = select_ctest_tests(
+            inventory, available_targets, None, model.artifacts if model else None)
+        test_targets.update(registered_targets)
     all_targets = {entry.target for entry in entries if entry.target}
+    if model and not cli.target:
+        all_targets.update(model.targets)
+    kind_targets = (test_targets if cli.kind == "tests" else benchmark_targets
+                    if cli.kind == "benchmarks" else all_targets)
+    scan_targets = model.prerequisites(kind_targets) if model else all_targets
     benchmark_entries = dedupe_entries_by_target_source(
         [entry for entry in entries if entry.target in benchmark_targets]
     )
@@ -894,6 +1066,8 @@ def main() -> int:
 
     directly_affected_targets: set[str] = set()
     for changed_path in changed_files:
+        if model:
+            directly_affected_targets.update(model.sources.get(changed_path, set()))
         for entry in source_to_entries.get(changed_path, []):
             if entry.target:
                 directly_affected_targets.add(entry.target)
@@ -901,24 +1075,31 @@ def main() -> int:
     dependency_scan_entries: list[CompileCommandEntry] = []
     if not infra_change and not only_benchmark_source_changes:
         if has_header_changes:
-            dependency_scan_entries = dedupe_entries_by_target_source(entries)
-        else:
-            dependency_scan_entries = benchmark_entries
+            dependency_scan_entries = dedupe_entries_by_target_source(
+                [entry for entry in entries if entry.target in scan_targets])
 
     if dependency_scan_entries:
         with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(8, (os.cpu_count() or 4))
+            max_workers=cli.jobs
         ) as pool:
-            list(pool.map(compute_tu_dependencies, dependency_scan_entries))
+            list(pool.map(lambda entry: compute_tu_dependencies(entry, cli.timeout),
+                          dependency_scan_entries))
 
     affected_targets: set[str] = set(directly_affected_targets)
     for entry in dependency_scan_entries:
         has_changed_dependency = any(dep in changed_files for dep in entry.dependencies)
-        if has_changed_dependency and entry.target:
+        if (has_changed_dependency or entry.dep_error) and entry.target:
             affected_targets.add(entry.target)
 
     if infra_change:
         affected_targets.update(all_targets)
+
+    if model:
+        affected_targets = model.consumers(affected_targets)
+    if cli.target:
+        affected_targets.intersection_update(cli.target)
+    if cli.kind != "all":
+        affected_targets.intersection_update(kind_targets)
 
     dependency_impacted_benchmark_targets = affected_targets.intersection(
         benchmark_targets
@@ -932,11 +1113,11 @@ def main() -> int:
     ast_errors: dict[str, str] = {}
     benchmark_target_to_names: dict[str, set[str]] = defaultdict(set)
     benchmark_target_to_affected: dict[str, set[str]] = defaultdict(set)
-    warnings: list[str] = []
+    warnings: list[str] = list(metadata_warnings)
     ast_fallback_used = False
     ast_entries_scanned = 0
 
-    if impacted_benchmark_entries:
+    if cli.ast and impacted_benchmark_entries:
         try:
             clangxx = discover_clangxx(cli.clangxx)
         except FileNotFoundError as exc:
@@ -951,7 +1132,7 @@ def main() -> int:
                 benchmark_target_to_names[target_name].update(fallback_names)
                 benchmark_target_to_affected[target_name].update(fallback_names)
         else:
-            max_ast_workers = min(2, (os.cpu_count() or 2))
+            max_ast_workers = min(2, cli.jobs)
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max_ast_workers
             ) as pool:
@@ -962,6 +1143,7 @@ def main() -> int:
                         changed_files,
                         changed_symbol_names,
                         clangxx,
+                        cli.timeout,
                     ): entry
                     for entry in impacted_benchmark_entries
                 }
@@ -1000,19 +1182,61 @@ def main() -> int:
                         if benchmark_names:
                             ast_fallback_used = True
 
-    if infra_change and benchmark_targets:
+    if cli.ast and infra_change and benchmark_targets:
         for target_name in sorted(benchmark_targets):
             for entry in target_to_entries.get(target_name, []):
                 names = benchmark_names_from_source(entry.source)
                 benchmark_target_to_names[target_name].update(names)
                 benchmark_target_to_affected[target_name].update(names)
 
+    # An incomplete AST must never erase a known affected target.
+    affected_benchmark_targets = sorted(affected_targets & benchmark_targets)
+    affected_test_targets = sorted(affected_targets & test_targets)
+    selected_targets = sorted((set(cli.target) & kind_targets) if cli.target else affected_targets)
+    selected_test_targets = set(selected_targets) & test_targets
+    build_dir = compile_commands_path.parent
+    selected_tests: list[str] = []
+    ctest_command = None
+    ctest_selection_method = None
+    if cli.ctest_json:
+        try:
+            selected_tests, mapped = select_ctest_tests(
+                inventory, selected_test_targets, cli.test_regex,
+                model.artifacts if model else None)
+            if selected_test_targets - mapped:
+                warnings.append("CTest inventory has unmapped targets: "
+                                + ", ".join(sorted(selected_test_targets - mapped)))
+            if selected_test_targets and not selected_tests:
+                raise ValueError("CTest selection matched zero tests; check inventory and filter")
+            if selected_tests:
+                selection_args, ctest_selection_method = ctest_selection(
+                    inventory, selected_tests, selected_test_targets)
+                ctest_command = ["ctest", "--test-dir", str(build_dir),
+                                 "-C", cli.config, "--output-on-failure",
+                                 "--no-tests=error", "-j", str(cli.jobs), *selection_args]
+                if ctest_selection_method == "indices":
+                    warnings.append("CTest indices require the same inventory/configuration; "
+                                    "regenerate the plan after rebuilding or changing registrations.")
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    elif selected_test_targets:
+        warnings.append("Test target candidates only: provide a current --ctest-json "
+                        "inventory to generate an exact CTest selection.")
+    if cli.target:
+        warnings.append("Analysis is limited to explicit --target values; other targets "
+                        "are unexamined, not proven unaffected.")
+    if cli.kind != "all":
+        warnings.append(f"Validation kind is {cli.kind}; other kinds are outside this selection.")
     if infra_change:
-        affected_benchmark_targets = sorted(benchmark_targets)
-    else:
-        affected_benchmark_targets = sorted(
-            target for target, names in benchmark_target_to_affected.items() if names
-        )
+        warnings.append("Build infrastructure changed: conservative target scope. "
+                        "Use explicit experiment files/targets for iteration, then review integration scope.")
+    if not model and affected_targets - benchmark_targets - test_targets:
+        warnings.append("Non-test/library targets are affected: inspect linked consumers "
+                        "in CMake/File API; compile dependencies do not encode link propagation.")
+    if selected_targets and (set(selected_targets) & benchmark_targets) and not cli.benchmark_regex:
+        warnings.append("List runtime benchmark registrations and select operation, variants, "
+                        "and sizes before timing; no full-suite fallback is implied.")
 
     all_affected_benchmarks: set[str] = set()
     for names in benchmark_target_to_affected.values():
@@ -1024,13 +1248,22 @@ def main() -> int:
         if entry.dep_error
     }
 
-    scope_mode = "normal"
+    scope_mode = "target_dependencies"
     if infra_change:
         scope_mode = "infra_fallback"
+    elif dep_scan_failures:
+        scope_mode = "dependency_fallback"
+        warnings.append("Dependency scope is conservative because some compiler scans failed.")
     elif ast_fallback_used:
         scope_mode = "ast_fallback"
 
     report: dict[str, Any] = {
+        "selection": "explicit_files" if cli.changed_file else (
+            "working_tree" if cli.working_tree_only else "branch"),
+        "validation_kind": cli.kind,
+        "analysis_limited_to_targets": sorted(set(cli.target)),
+        "target_metadata": target_metadata,
+        "cmake_file_api_index": model.index if model else None,
         "baseline": cli.baseline,
         "head": cli.head,
         "include_working_tree": cli.include_working_tree,
@@ -1041,19 +1274,31 @@ def main() -> int:
         ),
         "affected_targets": sorted(affected_targets),
         "affected_benchmark_targets": affected_benchmark_targets,
+        "affected_test_targets": affected_test_targets,
+        "selected_targets": selected_targets,
+        "selected_tests": selected_tests,
+        "build_command": (["cmake", "--build", str(build_dir), "--config", cli.config,
+                           "--target", *selected_targets, "-j", str(cli.jobs)]
+                          if selected_targets else None),
+        "ctest_command": ctest_command,
+        "ctest_selection_method": ctest_selection_method,
         "affected_benchmarks": {
             target: sorted(names)
             for target, names in sorted(benchmark_target_to_affected.items())
             if names
         },
-        "suggested_filter_regex": regex_for_benchmarks(all_affected_benchmarks),
+        "suggested_filter_regex": cli.benchmark_regex or regex_for_benchmarks(all_affected_benchmarks),
+        "benchmark_filter_verified": False,
         "dependency_entries_scanned": len(dependency_scan_entries),
+        "dependency_cache_hits": sum(e.dependency_origin == "depfile" for e in dependency_scan_entries),
+        "compiler_dependency_scans": sum(e.dependency_origin == "preprocessor" for e in dependency_scan_entries),
         "benchmark_entries_scanned": len(benchmark_entries),
         "ast_entries_scanned": ast_entries_scanned,
         "scope_mode": scope_mode,
         "dependency_scan_failures": dep_scan_failures,
         "ast_failures": ast_errors,
         "warnings": warnings,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
     }
 
     if cli.format == "json":
@@ -1061,10 +1306,25 @@ def main() -> int:
         sys.stdout.write("\n")
         return 0
 
+    if cli.format == "summary":
+        compact = {key: report[key] for key in (
+            "selection", "validation_kind", "analysis_limited_to_targets", "target_metadata",
+            "affected_targets", "affected_test_targets", "affected_benchmark_targets",
+            "build_command", "dependency_cache_hits", "compiler_dependency_scans",
+            "elapsed_seconds", "warnings")}
+        compact["ctest_selection_method"] = ctest_selection_method
+        compact["selected_test_count"] = len(selected_tests)
+        compact["candidate_benchmark_filter"] = report["suggested_filter_regex"]
+        json.dump(compact, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
     print(f"Baseline: {cli.baseline}")
     print(f"Head: {cli.head}")
     print(f"Compile commands: {report['compile_commands']}")
     print(f"Scope mode: {report['scope_mode']}")
+    print(f"Target metadata: {target_metadata}")
+    print(f"Selection: {report['selection']}; elapsed: {report['elapsed_seconds']} s")
     print(
         "Scan counts: "
         f"dependency={report['dependency_entries_scanned']}, "
@@ -1106,6 +1366,12 @@ def main() -> int:
     print("")
     print("Suggested --benchmark_filter regex:")
     print(report["suggested_filter_regex"] or "none")
+    print("\nAffected test targets:")
+    print(", ".join(affected_test_targets) or "none")
+    print("\nBuild selection:")
+    print(shlex.join(report["build_command"]) if report["build_command"] else "none")
+    print(f"\nSelected CTest cases: {len(selected_tests)}")
+    print(shlex.join(ctest_command) if ctest_command else "inventory required / no test targets")
 
     if dep_scan_failures:
         print("")

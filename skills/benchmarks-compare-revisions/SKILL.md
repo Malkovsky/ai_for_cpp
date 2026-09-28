@@ -9,7 +9,7 @@ Use this skill to compare performance between two git revisions.
 
 This workflow now depends on:
 
-1. `../benchmarks-affected/SKILL.md` to determine affected benchmark targets/functions and produce a benchmark filter.
+1. `../focused-validation/SKILL.md` to determine affected targets and select a runtime-verified benchmark filter.
 2. `../benchmarks/SKILL.md` for build/run operational details.
 
 ## Goal
@@ -38,9 +38,9 @@ CONTENDER=def5678
 
 ## Step 1 — Compute affected benchmark scope first
 
-Run `benchmarks-affected` from the contender checkout to derive the compare scope.
+Run `focused-validation` from the contender checkout to derive the compare scope.
 
-Do not duplicate `benchmarks-affected` internals here (compile database selection, AST analysis, or fallback heuristics). Follow that skill directly and consume only its outputs.
+Do not duplicate `focused-validation` internals here (native metadata, dependency scans, or fallback heuristics). Follow that skill directly and consume only its outputs.
 
 Inputs to pass through:
 
@@ -48,7 +48,7 @@ Inputs to pass through:
 - optional compile-commands path if auto-detection is not desired
 - optional output format (`json` recommended for parsing)
 
-Consume these outputs from `benchmarks-affected`:
+Consume these outputs from `focused-validation`:
 
 - `suggested_filter_regex` -> set `FILTER`
 - `affected_benchmark_targets` -> optionally constrain which benchmark binary/binaries to run
@@ -218,7 +218,7 @@ Capture and return:
 1. **Release only**: never compare Debug binaries.
 2. **Short hash suffixes**: keep build dirs isolated per revision (example: `bench_<short-hash>`).
 3. **Same host, same conditions**: do not compare across different machines or power profiles.
-4. **Filter from analysis**: use `benchmarks-affected` output instead of hand-crafted filters whenever possible.
+4. **Filter from analysis**: use `focused-validation` to select candidates and verify them against runtime registrations.
 5. **Pin process and frequency**: use `taskset -c ${BENCH_CPU:-0}` for all benchmark executions and follow benchmark skill guidance on CPU governor.
 6. **Counter collection is optional and Linux-only**: when unavailable, return timing-only outputs with `counters_available=false`.
 7. **Always preflight counters**: do not run full counter collection if preflight fails.

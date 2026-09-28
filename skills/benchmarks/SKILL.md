@@ -10,6 +10,13 @@ workflows:
 
 ## Build Directory Convention
 
+Reuse a compatible configured project preset/build tree during iteration.
+Do not create a fresh build or rebuild all targets for each experiment. Use
+`../focused-validation/SKILL.md` to select build/test targets and a small runtime
+slice. Filters reduce execution, not template compilation; use a narrow
+target/probe when a family translation unit is costly. Revision-suffixed
+directories below serve isolated comparisons, not every local timing run.
+
 Use a short commit hash suffix for committed revisions:
 
 ```bash
@@ -32,10 +39,10 @@ BUILD_SUFFIX=agent
 ## CRITICAL: Never Run Benchmarks from a Debug Build
 
 > **Always pass `--config Release` (or `--config RelWithDebInfo`) to `cmake --build`.**
-> Multi-config generators (MSVC, Xcode) default to `Debug` if no `--config` is given.
-> Google Benchmark will print `***WARNING*** Library was built as DEBUG` and timings will
-> be 3-10x slower and meaningless. Always verify the binary path contains `Release/` or
-> `RelWithDebInfo/`, never `Debug/`.
+> Multi-config generators may default to `Debug` when `--config` is omitted.
+> For single-config generators, verify `CMAKE_BUILD_TYPE` in the cache:
+> `--config Release` does not convert a Debug build. Check Google Benchmark's
+> reported build type as well; directory names alone do not prove optimization.
 
 ## Preflight Tools and Target
 
@@ -59,18 +66,20 @@ target; avoid combining host-native code with an unrelated model.
 
 ## Step 1 — Build
 
-If benchmarks affected by the changes are easily tractable build only related targets.
+Select targets before building. Set `BENCH_TARGET` to the selected target, or
+build several explicit targets together when needed. Prefer an existing project
+preset over configuring the example directories.
 
 **Pure timing (benchmarks, Release):**
 ```bash
 cmake -B build/benchmarks_${BUILD_SUFFIX} -DCMAKE_BUILD_TYPE=Release
-cmake --build build/benchmarks_${BUILD_SUFFIX} --config Release -j
+cmake --build build/benchmarks_${BUILD_SUFFIX} --config Release --target "${BENCH_TARGET:?select a benchmark target}" -j 2
 ```
 
 **Hardware counters / verbose report (benchmarks-diagnostic, RelWithDebInfo, Linux only):**
 ```bash
 cmake -B build/benchmarks-diagnostic_${BUILD_SUFFIX} -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBENCHMARK_ENABLE_LIBPFM=ON
-cmake --build build/benchmarks-diagnostic_${BUILD_SUFFIX} --config RelWithDebInfo -j
+cmake --build build/benchmarks-diagnostic_${BUILD_SUFFIX} --config RelWithDebInfo --target "${BENCH_TARGET:?select a benchmark target}" -j 2
 ```
 
 For repository-specific benchmark examples, check

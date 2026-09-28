@@ -23,7 +23,7 @@ If arguments are omitted:
 
 Filter handling:
 - If `--filter` is provided, pass it through.
-- Else use the filter produced by `benchmarks-affected` through `benchmarks-compare-revisions`.
+- Else use the filter produced by `focused-validation` through `benchmarks-compare-revisions`.
 - If no filter can be derived, run conservative full-binary compare for impacted binaries.
 
 ## Step 1 - Resolve branches and hashes
@@ -47,7 +47,7 @@ Consume outputs from `benchmarks-compare-revisions`:
 - Baseline and contender benchmark JSON artifacts.
 - compare.py output per binary.
 - Effective filter used.
-- Scope metadata from `benchmarks-affected` (`affected_benchmark_targets`, `affected_benchmarks`) when available.
+- Scope metadata from `focused-validation` (`affected_benchmark_targets`, `affected_benchmarks`) when available.
 - `counters_available` status and, when unavailable, explicit reason.
 - Baseline and contender counter JSON artifacts (when available).
 - Derived counter metrics per benchmark (IPC, cache miss rate, branch mispredict rate).
