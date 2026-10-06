@@ -16,6 +16,8 @@ This workflow depends on:
    scope during iteration and broader validation before promotion.
 3. `../benchmarks-compare-revisions/SKILL.md` when comparing committed
    revisions.
+4. `../profiling/SKILL.md` when sampled hot paths or annotated assembly are
+   needed; interactive HTML reports are optional user-requested artifacts.
 
 ## Goal
 

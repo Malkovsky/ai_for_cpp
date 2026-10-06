@@ -23,6 +23,7 @@ linked by the badge above.
 | `optimization-experiment` | Run validated C++ optimization experiments. |
 | `paper-search` | Search academic literature and manage references. |
 | `pdf` | Read, create, and combine PDF files. |
+| `profiling` | Analyze native workloads with perf; optionally export source-aware HTML reports. |
 | `setup-cpp-repo` | Scaffold a modern C++20 repository. |
 
 ## Recommended MCP Servers

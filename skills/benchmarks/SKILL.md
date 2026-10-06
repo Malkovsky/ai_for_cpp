@@ -229,33 +229,12 @@ Reject scaled/multiplexed or `<not counted>` results; split the event group and
 rerun. Treat counters as diagnostic. Treat pinned elapsed timing and the
 representative integrated benchmark suite as authoritative.
 
-## Step 4 — Profile with perf (Linux only)
+## Step 4 — Profile when counters need explanation
 
-Use when hardware counters alone are not enough and you need a full call-graph profile for post-processing.
-
-**Record:**
-```bash
-perf record -g -F 999 \
-  -- ${BENCH_RUN} build/benchmarks-diagnostic_${BUILD_SUFFIX}/benchmarks \
-  --benchmark_filter="${FILTER}" \
-  --benchmark_min_time=5s
-```
-
-**Quick report (terminal):**
-```bash
-perf report --stdio
-```
-
-**Flame graph (requires FlameGraph scripts):**
-```bash
-perf script | stackcollapse-perf.pl | flamegraph.pl > flamegraph.html
-```
-
-**Export for external tools (Hotspot, Firefox Profiler):**
-```bash
-perf script -F +pid > perf.data.txt
-# or open with `hotspot perf.data`
-```
+Use [the profiling skill](../profiling/SKILL.md) for native perf captures,
+query-window boundaries, sampled-PC attribution and annotated assembly.
+Interactive HTML/flame-graph reports are optional user-requested artifacts;
+they are not required to analyze a benchmark.
 
 ## Useful Benchmark Flags
 

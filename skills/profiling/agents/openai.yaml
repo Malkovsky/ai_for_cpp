@@ -1,0 +1,4 @@
+interface:
+  display_name: "Profiling"
+  short_description: "Profile native workloads with perf and inspect hotspots"
+  default_prompt: "Use $profiling to identify the hot paths in this native workload with perf."
