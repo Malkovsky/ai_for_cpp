@@ -104,6 +104,10 @@ are unpinned and more noisy.
 Execution guardrails:
 - Run benchmark commands sequentially in CI.
 - Avoid background jobs (`nohup`, `&`) for benchmark collection.
+- When a user-requested structured benchmark suite continues in a background
+  or tool session, report periodic user-facing progress bars with completed/total
+  groups or cases, for example `[██████░░░░] 6/10 groups`. Advance the bar from
+  completed measurements, not elapsed time, so progress is easy to assess visually.
 - Always write machine-readable results with `--benchmark_out` when data is later parsed.
 
 ### Available benchmark binaries
