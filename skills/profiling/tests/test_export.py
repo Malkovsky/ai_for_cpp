@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from export_html import build_model, parse_samples, resolve_sources, validate
-from source_analysis import attach_sources, function_extent
+from source_analysis import attach_sources, attach_sampled_costs, function_extent
 
 
 def sample(frames, period=10, event="cycles:u", pid=7):
@@ -28,6 +28,72 @@ def model_for(text):
 
 
 class ExportTests(unittest.TestCase):
+    def test_function_type_parentheses_preserve_symbol_and_module(self):
+        name = "std::function<void (int)>::operator()(int) const"
+        samples = parse_samples(sample([(name + "+0x3f6", 0x1234, "inlined")]))
+        frame = samples[0]["frames"][0]
+        self.assertEqual(frame["name"], name)
+        self.assertEqual(frame["dso"], "inlined")
+        self.assertEqual(frame["offset"], 0x3f6)
+
+    def test_inline_without_wrapper_and_cloned_symbol_sources(self):
+        samples = parse_samples(sample([
+            ("kernel+0x4", 0x1104, "inlined"),
+            ("main+0x8", 0x1208, "/work"),
+        ]))
+        outputs = [
+            "100 T kernel [clone .isra.0]\n200 T main\n",
+            "0x104\nkernel\n/src/kernel.cc:43\n0x208\nmain\n/src/main.cc:8\n",
+        ]
+        with patch("export_html.subprocess.check_output", side_effect=outputs):
+            resolve_sources(samples, Path("work"), "/work", [])
+        leaf = samples[0]["frames"][-1]
+        self.assertEqual(leaf["address"], 0x104)
+        self.assertEqual(leaf["source"], "/src/kernel.cc:43")
+        self.assertEqual(leaf["name"], "kernel")
+        cloned = parse_samples(sample([
+            ("kernel [clone .isra.0]+0x4", 0x1104, "/work")
+        ]))
+        with patch("export_html.subprocess.check_output", side_effect=outputs):
+            resolve_sources(cloned, Path("work"), "/work", [])
+        self.assertEqual(cloned[0]["frames"][0]["source"], "/src/kernel.cc:43")
+
+    def test_removed_wrapper_preserves_inline_module(self):
+        samples = parse_samples(sample([
+            ("outer", 0x1100, "/work"),
+            ("child", 0x1100, "inlined"),
+            ("outer", 0x1100, "/work"),
+        ]))
+        with patch("export_html.subprocess.check_output", return_value="100 T outer\n"):
+            resolve_sources(samples, Path("work"), "/work", [], collect=False)
+        self.assertEqual(samples[0]["frames"][-1]["address"], 0x100)
+
+    def test_sampled_lines_exclude_callees_and_keep_unmapped_self(self):
+        samples = parse_samples(
+            sample([("kernel", 0x104, "/work")], 70) + "\n\n"
+            + sample([("child", 0x204, "/work"), ("kernel", 0x108, "/work")], 20)
+            + "\n\n" + sample([("kernel", 0x10c, "/work")], 10)
+        )
+        samples[0]["frames"][-1].update(source="/src.cc:43", address=0x104)
+        samples[1]["frames"][-1].update(source="/src.cc:5", address=0x204)
+        model, _ = build_model(samples, {"warnings": []})
+        attach_sources(model, samples, Path("work"), Path.cwd(), collect=False)
+        fn = model["functions"]["kernel"]
+        self.assertEqual(fn["sampled_lines"], [dict(path="/src.cc", line=43, weight=70)])
+        self.assertEqual(fn["unmapped_self_weight"], 10)
+        self.assertEqual(sum(a["weight"] for a in fn["assembly"]), 70)
+        with (
+            patch("source_analysis.shutil.which", return_value="/usr/bin/objdump"),
+            patch("source_analysis.subprocess.check_output", return_value=(
+                "00000100 <kernel>:\n 100: mov %rax,%rbx\n"
+                " 104: dec %rcx\n 108: ret\n00000200 <child>:\n 204: ret\n"
+            )),
+        ):
+            attach_sampled_costs(model, samples, Path("work"), True)
+        self.assertEqual(fn["assembly"][1]["instruction"], "dec %rcx")
+        self.assertEqual(fn["assembly"][1]["weight"], 70)
+        self.assertEqual(fn["assembly"][0]["weight"], 0)
+
     def test_periods_not_counts_and_unknown_leaves(self):
         _, model = model_for(
             sample([("leaf+0x4", 0x104, "/work"), ("main+0x8", 0x208, "/work")], 70)
@@ -173,7 +239,8 @@ class ExportTests(unittest.TestCase):
             frames[0]["frames"][1]["address"] = 0x104
             model, _ = build_model(frames, {"warnings": []})
             with (
-                patch("source_analysis.shutil.which", return_value="llvm-dwarfdump"),
+                patch("source_analysis.shutil.which",
+                      side_effect=lambda name: "llvm-dwarfdump" if name == "llvm-dwarfdump" else None),
                 patch(
                     "source_analysis.parse_dwarf",
                     return_value={1: parent, 2: child, 3: inline},

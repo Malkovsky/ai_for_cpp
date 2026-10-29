@@ -21,23 +21,29 @@ function callsFor(n,path,line){return (model.functions[n.name]?.calls||[]).filte
 function renderSource(n){
  if(sourceFunction!==n.name){$('source').scrollTop=0;sourceFunction=n.name;}
  const groups=sourceRanges(n),fn=model.functions[n.name];
- if(!groups.length){$('source').innerHTML='<p class="empty">Select a frame with source locations to inspect its function.</p>';return;}
+ if(!groups.length&&!fn?.assembly?.length){$('source').innerHTML='<p class="empty">Select a frame with source locations or sampled instructions.</p>';return;}
  let html=groups.map(({path,file,marked,ranges,full})=>{
   const heading=`<div class="source-path" title="${esc(path)}">${esc(file?.display||path)}${full?'<span class="scope-label">Full function</span>':''}</div>`;
   if(!file?.available)return `<section class="source-file">${heading}<p class="empty">Source file unavailable in this export.</p></section>`;
-  let code='';ranges.forEach((range,index)=>{if(index)code+='<div class="code-gap" aria-label="Omitted lines">⋯</div>';
+  let code='<div class="code-line cost-header"><span class="line-number">Line</span><span class="sample-cost">Self %</span><span class="line-cost">Callees %</span><span>Source</span></div>';ranges.forEach((range,index)=>{if(index)code+='<div class="code-gap" aria-label="Omitted lines">⋯</div>';
    for(let line=range.start;line<=range.end;line++){
     const text=file.lines[String(line)];if(text===undefined)continue;
     const calls=callsFor(n,path,line),cost=calls.reduce((sum,c)=>sum+c.weight,0);
     const tip=calls.map(c=>`${c.callee}: ${pct(c.weight)} including descendants`).join('\n');
     const badge=calls.length?`<button class="line-cost" data-call-line="${line}" data-call-path="${esc(path)}" data-function="${esc(n.name)}" title="${esc(tip)}">${pct(cost)}</button>`:'<span class="line-cost empty-cost"></span>';
-    code+=`<div class="code-line${marked.has(line)?' sampled':''}"><span class="line-number">${line} :</span>${badge}<code class="code-text">${esc(text)}</code></div>`;
+    const self=(fn?.sampled_lines||[]).filter(s=>s.path===path&&s.line===line).reduce((sum,s)=>sum+s.weight,0);
+    const sampleBadge=`<span class="sample-cost" title="Sampled leaf instruction weight, excluding counted callees; share of all selected periods">${self?pct(self):'—'}</span>`;
+    code+=`<div class="code-line${self||marked.has(line)?' sampled':''}"><span class="line-number">${line} :</span>${sampleBadge}${badge}<code class="code-text">${esc(text)}</code></div>`;
    }
   });
   return `<section class="source-file">${heading}<div class="code-block">${code}</div></section>`;
  }).join('');
  const unresolved=fn?.calls.filter(c=>c.path===null)||[];
  if(unresolved.length)html+=`<div class="unmapped-calls">Callee samples without a resolved call line: ${unresolved.map(c=>`${esc(c.label)} ${pct(c.weight)}`).join(' · ')}</div>`;
+ if(fn?.unmapped_self_weight)html+=`<div class="unmapped-calls">Self samples without a source line: ${pct(fn.unmapped_self_weight)}</div>`;
+ if(fn?.assembly?.length){
+  html+=`<details class="assembly" open><summary>Sampled assembly · ELF addresses · neighboring instructions included</summary><p class="source-help">Self % uses all selected sample periods. A dash means no samples attributed here, not zero execution cost. Sampling skid and stalls can shift weight to a consuming instruction. Gaps between instruction groups are omitted.</p><table><thead><tr><th>Address</th><th>Self %</th><th>Samples</th><th>Instruction</th></tr></thead><tbody>${fn.assembly.map(a=>`<tr><td><code>${esc(a.address)}</code></td><td>${a.weight?pct(a.weight):'—'}</td><td>${a.samples||'—'}</td><td><code>${esc(a.instruction)}</code></td></tr>`).join('')}</tbody></table></details>`;
+ }
  $('source').innerHTML=html;
 }
 function describe(n){
