@@ -8,6 +8,76 @@ import subprocess
 import shutil
 
 
+def canonical_symbol(name):
+    """Strip compiler clone suffixes without changing the displayed symbol."""
+    return re.sub(r" \[clone [^\]]+\]$", "", name)
+
+
+def attach_sampled_costs(model, samples, binary, collect):
+    """Attribute each leaf sample once; keep self costs separate from callees."""
+    lines = collections.Counter()
+    instructions = collections.Counter()
+    counts = collections.Counter()
+    for sample in samples:
+        leaf = sample["frames"][-1]
+        location = re.match(r"^(.*):(\d+)(?:\s.*)?$", leaf["source"])
+        if location and int(location[2]) > 0:
+            lines[(leaf["name"], location[1], int(location[2]))] += sample["weight"]
+        address = leaf.get("address")
+        if address is not None:
+            instructions[(leaf["name"], address)] += sample["weight"]
+            counts[(leaf["name"], address)] += 1
+    for fn in model["functions"].values():
+        fn["sampled_lines"] = []
+        fn["assembly"] = []
+    for (name, path, line), weight in sorted(lines.items()):
+        model["functions"][name]["sampled_lines"].append(
+            dict(path=path, line=line, weight=weight)
+        )
+    decoded = {}
+    groups = []
+    if collect and instructions:
+        objdump = shutil.which("objdump")
+        if objdump:
+            output = subprocess.check_output(
+                [objdump, "-d", "--no-show-raw-insn", str(binary)], text=True
+            )
+            group = []
+            for text in output.splitlines():
+                if re.match(r"^[0-9a-fA-F]+ <.*>:$", text):
+                    group = []
+                    groups.append(group)
+                match = re.match(r"^\s*([0-9a-fA-F]+):\s+(.+)$", text)
+                if match:
+                    address = int(match[1], 16)
+                    decoded[address] = (group, len(group))
+                    group.append((address, match[2]))
+        else:
+            model["meta"]["warnings"].append(
+                "objdump unavailable: sampled instruction addresses have no disassembly"
+            )
+    by_name = collections.defaultdict(set)
+    for name, address in instructions:
+        by_name[name].add(address)
+        if address in decoded:
+            group, i = decoded[address]
+            by_name[name].update(a for a, _ in group[max(0, i - 3):i + 4])
+    for name, addresses in by_name.items():
+        fn = model["functions"][name]
+        for address in sorted(addresses):
+            group, i = decoded.get(address, ([], 0))
+            fn["assembly"].append(dict(
+                address=hex(address),
+                instruction=group[i][1] if group else "Disassembly unavailable",
+                weight=instructions[(name, address)],
+                samples=counts[(name, address)],
+            ))
+    for fn in model["functions"].values():
+        fn["unmapped_self_weight"] = fn["self_weight"] - sum(
+            line["weight"] for line in fn["sampled_lines"]
+        )
+
+
 def parse_dwarf(binary, dwarfdump="llvm-dwarfdump"):
     output = subprocess.check_output(
         [dwarfdump, "--debug-info", str(binary)], text=True
@@ -210,10 +280,10 @@ def attach_sources(model, samples, binary, source_root, source_maps=(), collect=
         return text
 
     for name in names:
-        candidates = declarations.get(name, [])
+        candidates = declarations.get(canonical_symbol(name), [])
         # Non-template demangling sometimes omits an explicit return type.
         if not candidates:
-            matches = [key for key in declarations if name.endswith(" " + key)]
+            matches = [key for key in declarations if canonical_symbol(name).endswith(" " + key)]
             if len(matches) == 1:
                 candidates = declarations[matches[0]]
         for d in sorted(
@@ -260,8 +330,8 @@ def attach_sources(model, samples, binary, source_root, source_maps=(), collect=
         )
         if key in cache:
             return cache[key]
-        parent_name, child_name = caller["name"], callee["name"]
-        definition = definitions.get(parent_name)
+        definition = definitions.get(caller["name"])
+        parent_name, child_name = canonical_symbol(caller["name"]), canonical_symbol(callee["name"])
         candidates = inline.get((parent_name, child_name), [])
         if not candidates:
             keys = [
@@ -391,10 +461,13 @@ def attach_sources(model, samples, binary, source_root, source_maps=(), collect=
             )
         files[filename] = entry
     model["source_files"] = files
+    attach_sampled_costs(model, samples, binary, collect)
     model["meta"]["source_annotation"] = dict(
         full_definitions=len(definitions),
         functions=len(names),
         call_edge_mapping=dict(mapping),
         percentage_denominator="All selected period weights",
         line_cost="Inclusive cost of direct counted callees; nested callees are not added twice",
+        sampled_line_cost="Leaf instruction sample periods, excluding counted callees; global denominator",
+        assembly="Sampled ELF instruction addresses with three neighboring instructions; zero means no attributed samples",
     )

@@ -11,14 +11,16 @@ import re
 import subprocess
 import sys
 
-from source_analysis import attach_sources
+from source_analysis import attach_sources, canonical_symbol
 
 
 HEADER = re.compile(
     r"^\s*(.*?)\s+(\d+(?:/\d+)?)\s+(?:\[\d+\]\s+)?"
     r"(\d+\.\d+):\s+(\d+)\s+(\S+):\s*(.*)$"
 )
-FRAME = re.compile(r"^\s*([0-9a-fA-F]+)\s+(.*?)\s+\((.*)\)\s*$")
+# The module is the final parenthesized field. C++ symbols themselves can
+# contain " (" (for example std::function<void (int)>).
+FRAME = re.compile(r"^\s*([0-9a-fA-F]+)\s+(.*)\s+\((.*)\)\s*$")
 OFFSET = re.compile(r"\+0x([0-9a-fA-F]+)$")
 
 
@@ -61,6 +63,15 @@ def parse_samples(text, event=None, root=None):
             ):
                 continue
             frames.append(entry)
+        # Preserve module ownership before removing redundant native wrappers.
+        for entry in frames:
+            if entry["dso"] == "inlined":
+                modules = {
+                    f["dso"] for f in frames
+                    if f["ip"] == entry["ip"] and f["dso"] != "inlined"
+                }
+                if len(modules) == 1:
+                    entry["inline_module"] = next(iter(modules))
         # Collapse perf's raw outer-symbol wrapper only when the same PC/symbol
         # reappears around inline frames. Real recursive calls remain intact.
         if frames:
@@ -141,12 +152,10 @@ def resolve_sources(samples, binary, dso, warnings, collect=True):
                 anchor = next(
                     (f for f in reversed(frames[:i]) if f["dso"] != "inlined"), None
                 )
-                frame["target"] = bool(
-                    anchor and target(anchor["dso"]) and anchor["ip"] == frame["ip"]
-                )
-                frame["module"] = (
+                frame["module"] = frame.get("inline_module") or (
                     anchor["dso"] if anchor and anchor["ip"] == frame["ip"] else None
                 )
+                frame["target"] = bool(frame["module"] and target(frame["module"]))
         candidates = collections.Counter(
             f["ip"] - symbols[f["name"]] - f["offset"]
             for f in frames
@@ -164,17 +173,13 @@ def resolve_sources(samples, binary, dso, warnings, collect=True):
             if frame["target"] and base is not None and frame["ip"] >= base:
                 frame["address"] = frame["ip"] - base
                 addresses.add(frame["address"])
-            elif frame["dso"] == "inlined" and not frame["target"]:
-                module = (
-                    Path(frame["module"]).name
-                    if frame["module"]
-                    else "unresolved module"
-                )
-                frame["name"] += f" [{module}]"
-            elif frame["dso"] != "[unknown]" and not frame["target"]:
-                # Prevent another DSO's identically named function from inheriting
-                # the supplied executable's source definition.
-                frame["name"] += f" [{Path(frame['dso']).name}]"
+            elif (collect and frame["dso"] == "inlined" and frame["module"] is None
+                  and base is not None and frame["ip"] >= base):
+                # perf may emit an entire machine frame as "(inlined)", with
+                # no native wrapper at that PC. Probe DWARF, but accept only
+                # an exact canonical symbol match, never the caller's line.
+                frame["candidate_address"] = frame["ip"] - base
+                addresses.add(frame["candidate_address"])
     if not addresses:
         warnings.append(
             "No load bias resolved for supplied binary; source PCs remain unavailable"
@@ -205,11 +210,23 @@ def resolve_sources(samples, binary, dso, warnings, collect=True):
                 chains[address].append(line)
     for sample in samples:
         for frame in sample["frames"]:
-            chain = chains.get(frame["address"], [])
+            address = frame["address"]
+            if address is None:
+                address = frame.get("candidate_address")
+            chain = chains.get(address, [])
             for i in range(0, len(chain) - 1, 2):
-                if chain[i] == frame["name"] and chain[i + 1] != "??:0":
+                if (canonical_symbol(chain[i]) == canonical_symbol(frame["name"])
+                        and chain[i + 1] != "??:0"):
+                    frame["target"] = True
+                    frame["module"] = dso
+                    frame["address"] = address
                     frame["source"] = chain[i + 1]
                     break
+            if frame["dso"] == "inlined" and not frame["target"]:
+                module = Path(frame["module"]).name if frame["module"] else "unresolved module"
+                frame["name"] += f" [{module}]"
+            elif frame["dso"] != "[unknown]" and not frame["target"]:
+                frame["name"] += f" [{Path(frame['dso']).name}]"
 
 
 def label(name):
@@ -330,6 +347,13 @@ def validate(model):
             c["weight"] for c in function["calls"]
         ):
             raise ValueError(f"Function costs are not conserved: {function['name']}")
+        if "sampled_lines" in function:
+            mapped = sum(line["weight"] for line in function["sampled_lines"])
+            if (function["unmapped_self_weight"] < 0
+                    or mapped + function["unmapped_self_weight"] != function["self_weight"]):
+                raise ValueError("Sampled source costs are not conserved")
+            if sum(row["weight"] for row in function["assembly"]) > function["self_weight"]:
+                raise ValueError("Sampled instruction costs exceed self weight")
 
 
 def svg(model):

@@ -66,4 +66,19 @@ if (call) {
 }
 get('reset').onclick();
 assert.equal(get('details').innerHTML, rootDetails);
+const sampled = Object.values(model.functions)
+  .filter(fn => fn.sampled_lines?.length && fn.assembly?.some(a => a.weight))
+  .sort((a, b) => b.self_weight - a.self_weight)[0];
+assert.ok(sampled, 'Use a report with resolved sampled instructions');
+get('hotspots').onclick(event({ name: sampled.name }));
+assert.ok(get('source').innerHTML.includes('Self %'));
+assert.ok(get('source').innerHTML.includes('Callees %'));
+assert.ok(get('source').innerHTML.includes('Sampled assembly'));
+const hottest = sampled.sampled_lines.reduce((a, b) => a.weight > b.weight ? a : b);
+assert.ok(get('source').innerHTML.includes(percent(hottest.weight)));
+const instruction = sampled.assembly.reduce((a, b) => a.weight > b.weight ? a : b);
+assert.ok(get('source').innerHTML.includes(instruction.address));
+assert.ok(get('source').innerHTML.includes(percent(instruction.weight)));
+assert.equal(sampled.sampled_lines.reduce((s, l) => s + l.weight, 0)
+  + sampled.unmapped_self_weight, sampled.self_weight);
 console.log('Viewer navigation, percentages and contiguous function bodies passed.');

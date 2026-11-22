@@ -80,6 +80,12 @@ Read [the report reference](references/html-report.md) only for this mode.
 and bottom-up stacks, contiguous function bodies, total/self percentages and
 resolved call-line costs. It also exports folded stacks for other viewers.
 
+Use the bundled viewer as the primary report and preserve its visual layout
+unless the user requests a redesign. Adapt workload text and metadata; keep
+additional findings or charts secondary. Follow the report reference's
+presentation and validation guidance rather than building a separate landing
+page.
+
 ```sh
 python3 <skill>/scripts/export_html.py \
   --perf-data /tmp/profile/perf.data --binary ./build/profile/my_workload \
